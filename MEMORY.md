@@ -45,8 +45,13 @@ cd D:\GitHub-Projects\Recorder-by-Alex
 | Password | in `keystore.properties` (git-ignored) / `RECORDER_STORE_PASSWORD` |
 | Cert SHA-256 | `A4:15:7C:5B:F6:78:23:B8:2E:4B:94:37:1D:99:23:AF:0E:9E:54:26:20:11:B7:00:BE:98:76:A4:3C:C6:7C:4F` |
 
-**Backup outside the project: `D:\Recorder-Signing-Keys\`** (keystore + properties +
-a README). Without it the app can never be updated over an installed release.
+The keystore lives **inside** the project (`keystore/recorder-by-alex.jks` +
+`keystore.properties`) and both are git-ignored. The extra copy in
+`D:\Recorder-Signing-Keys\` was removed on 2026-10-21 — the project's own copy
+signs a release correctly (verified: `apksigner` reports cert SHA-256
+`a4157c5b…cc67c4f`, matching the table above) and a private backup is kept
+elsewhere. Keep a backup **outside** the repository: without the key the app
+can never be updated over an installed release.
 
 ### Deploying to the phone
 
