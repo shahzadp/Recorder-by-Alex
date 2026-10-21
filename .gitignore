@@ -1,0 +1,34 @@
+# Gradle
+.gradle/
+build/
+app/build/
+local.properties
+.kotlin/
+
+# Build outputs
+*.apk
+*.aab
+*.ap_
+*.dex
+*.hprof
+
+# Build logs
+*.log
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Release signing - never commit these.
+#
+# Android identifies an app by its signing key: if these files end up in the
+# repository they can be used to sign a fake update of this app. Keep a
+# private backup outside the project instead, because without them you can
+# never publish an update over an already installed release.
+keystore/
+keystore.properties
+*.jks
+*.keystore

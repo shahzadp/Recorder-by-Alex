@@ -1,0 +1,21 @@
+# Normalise line endings in the repository (LF), and check out on Windows
+# with CRLF. The global core.autocrlf=true would otherwise give the `gradlew`
+# shell script CRLF endings, which breaks it on Linux and macOS.
+* text=auto eol=lf
+
+# Windows batch files need CRLF to run.
+*.bat text eol=crlf
+gradlew.bat text eol=crlf
+
+# `gradlew` must stay a POSIX shell script with LF endings.
+gradlew text eol=lf
+
+# Binaries - never touch the line endings.
+*.jar binary
+*.apk binary
+*.aab binary
+*.png binary
+*.jks binary
+*.keystore binary
+*.mp4 binary
+*.m4a binary

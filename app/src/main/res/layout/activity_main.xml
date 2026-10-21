@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/black"
+    android:fitsSystemWindows="true"
+    android:orientation="vertical">
+
+    <!-- Top bar: sits above the camera, no preview behind it. -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/scrim"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="12dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp">
+
+        <com.google.android.material.button.MaterialButtonToggleGroup
+            android:id="@+id/modeGroup"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            app:selectionRequired="true"
+            app:singleSelection="true">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnModeAudio"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/mode_audio" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnModeVideo"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/mode_video" />
+        </com.google.android.material.button.MaterialButtonToggleGroup>
+
+        <View
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
+
+        <!-- Zoom (video mode only) -->
+        <LinearLayout
+            android:id="@+id/zoomBar"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnZoomOut"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="0dp"
+                android:paddingHorizontal="12dp"
+                android:text="@string/zoom_out" />
+
+            <TextView
+                android:id="@+id/tvZoom"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:minWidth="44dp"
+                android:text="1.0x"
+                android:textColor="@color/white" />
+
+            <Button
+                android:id="@+id/btnZoomIn"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="0dp"
+                android:paddingHorizontal="12dp"
+                android:text="@string/zoom_in" />
+        </LinearLayout>
+
+        <!-- Settings (gear icon, top-right). Using a TextView with the Unicode gear
+             emoji avoids any drawable rendering ambiguity. The box is wrap_content
+             so the emoji's full line box (which is taller than the glyph) is never
+             clipped at the bottom; minWidth/minHeight keep the tap target 44dp. -->
+        <TextView
+            android:id="@+id/btnSettings"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:clickable="true"
+            android:contentDescription="@string/settings"
+            android:focusable="true"
+            android:gravity="center"
+            android:minWidth="44dp"
+            android:minHeight="44dp"
+            android:paddingHorizontal="8dp"
+            android:paddingVertical="4dp"
+            android:text="⚙️"
+            android:textColor="@color/white"
+            android:textSize="22sp" />
+    </LinearLayout>
+
+    <!-- Camera preview region (shortened: below the top bar). -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:background="@color/black">
+
+        <androidx.camera.view.PreviewView
+            android:id="@+id/previewView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <!-- Audio mode panel -->
+        <LinearLayout
+            android:id="@+id/audioPanel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:padding="24dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:maxWidth="320dp"
+                android:text="@string/audio_mode_title"
+                android:textColor="@color/white"
+                android:textSize="34sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:gravity="center"
+                android:maxWidth="320dp"
+                android:text="@string/audio_mode_hint"
+                android:textColor="#B3FFFFFF"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/tvTimer"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal"
+            android:layout_marginTop="12dp"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="4dp"
+            android:shadowColor="#000000"
+            android:shadowDx="0"
+            android:shadowDy="2"
+            android:shadowRadius="4"
+            android:textColor="@color/white"
+            android:textSize="16sp"
+            android:visibility="gone" />
+    </FrameLayout>
+
+    <!-- Bottom controls (nav-bar safe). -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/scrim"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="20dp">
+
+        <Button
+            android:id="@+id/btnPause"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="8dp"
+            android:layout_weight="1"
+            android:text="@string/pause"
+            android:visibility="invisible" />
+
+        <Button
+            android:id="@+id/btnRecord"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="8dp"
+            android:layout_weight="1"
+            android:backgroundTint="?attr/colorError"
+            android:text="@string/record" />
+
+        <Button
+            android:id="@+id/btnSwitch"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/switch_camera" />
+    </LinearLayout>
+</LinearLayout>

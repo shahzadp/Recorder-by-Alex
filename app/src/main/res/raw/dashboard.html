@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Recorder by Alex - Live</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    background: #101014; color: #e6e0e9;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0 0 14px; font-weight: 600; }
+  .stage {
+    background: #000; border-radius: 14px; overflow: hidden;
+    border: 1px solid #2c2933;
+  }
+  video { width: 100%; display: block; aspect-ratio: 4 / 3; background: #000; }
+  h2 { font-size: 13px; margin: 18px 0 8px; color: #938f99; font-weight: 600;
+       text-transform: uppercase; letter-spacing: .08em; }
+  button {
+    width: 100%; padding: 15px 12px; font-size: 15px; font-weight: 600;
+    border: 0; border-radius: 12px; cursor: pointer; color: #fff;
+    background: #4f378b; font-family: inherit;
+  }
+  button.audio { background: #1f6f5c; }
+  button.stop { background: #8c1d18; }
+  button:disabled { opacity: .45; cursor: default; }
+  .status {
+    margin-top: 14px; padding: 10px 12px; border-radius: 10px;
+    background: #1b1a20; font-size: 13px; line-height: 1.6; color: #cac4d0;
+  }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 7px; }
+  .on { background: #3ddc84; } .off { background: #f2b8b5; }
+  .hint { margin-top: 10px; font-size: 12px; color: #8f8a99; }
+</style>
+</head>
+<body>
+
+<h1>Recorder by Alex</h1>
+
+<div class="stage">
+  <video id="player" autoplay muted playsinline controls></video>
+</div>
+
+<h2>Recording</h2>
+<button id="audioBtn" class="audio">Start audio recording</button>
+<div style="height:8px"></div>
+<button id="videoBtn">Start video recording</button>
+
+<div class="status">
+  <div><span id="streamDot" class="dot off"></span><span id="streamState">Live stream: starting…</span></div>
+  <div id="recState" style="margin-top:6px">Recorder: idle</div>
+  <div id="info" style="margin-top:6px"></div>
+</div>
+
+<div class="hint" id="hint"></div>
+
+<!-- The player comes from the phone itself, so the dashboard also works
+     without an internet connection. -->
+<script src="/hls.min.js"></script>
+<script>
+(function () {
+  var player = document.getElementById('player');
+  var audioBtn = document.getElementById('audioBtn');
+  var videoBtn = document.getElementById('videoBtn');
+  var streamDot = document.getElementById('streamDot');
+  var streamState = document.getElementById('streamState');
+  var recState = document.getElementById('recState');
+  var info = document.getElementById('info');
+  var hint = document.getElementById('hint');
+
+  var hls = null;
+  var lastInit = '';
+  var localError = '';
+  var serverError = '';
+  var fragments = 0;
+
+  function showError(text) {
+    localError = text || '';
+    renderInfo();
+  }
+
+  function renderInfo() {
+    if (localError) {
+      info.innerHTML = '<span style="color:#f2b8b5">' + localError + '</span>';
+    } else if (serverError) {
+      info.innerHTML = '<span style="color:#f2b8b5">' + serverError + '</span>';
+    } else {
+      info.textContent = fragments ? fragments + ' segment(s) buffered' : '';
+    }
+  }
+
+  function loadStream(initId) {
+    if (initId === lastInit) return;
+    lastInit = initId;
+    if (hls) { hls.destroy(); hls = null; }
+    var url = '/live.m3u8';
+    if (window.Hls && window.Hls.isSupported()) {
+      hls = new Hls({ lowLatencyMode: false, liveSyncDurationCount: 2, maxLiveSyncPlaybackRate: 1.0 });
+      hls.on(Hls.Events.ERROR, function (evt, data) {
+        if (data && data.fatal) { hint.textContent = 'Stream error - retrying...'; setTimeout(poll, 2000); }
+      });
+      hls.loadSource(url);
+      hls.attachMedia(player);
+    } else if (player.canPlayType('application/vnd.apple.mpegurl')) {
+      player.src = url;
+    } else {
+      hint.textContent = 'This browser cannot play HLS. Try Chrome or Safari.';
+    }
+  }
+
+  function post(path, btn) {
+    // Give feedback right away - the phone may need a moment.
+    var label = btn.textContent;
+    btn.textContent = 'Working…';
+    btn.disabled = true;
+    // Some phones put the app to sleep when it is closed. The request then
+    // waits until the phone wakes up, which can take a few seconds.
+    var slow = setTimeout(function () {
+      showError('The phone is slow to answer - it may be waking up…');
+    }, 4000);
+    // Never leave the button stuck: even if the phone does not answer, it has
+    // to become usable again.
+    var giveUp = setTimeout(function () {
+      btn.textContent = label;
+      btn.disabled = false;
+      showError('The phone did not answer in time - the request may still run.');
+    }, 25000);
+    return fetch(path, { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        clearTimeout(slow);
+        if (res && res.error) showError(res.error);
+        else showError('');
+      })
+      .catch(function (err) {
+        clearTimeout(slow);
+        showError('the phone did not answer (' + err + ')');
+      })
+      .then(function () {
+        clearTimeout(slow);
+        clearTimeout(giveUp);
+        btn.textContent = label;
+        btn.disabled = false;
+        poll();
+      });
+  }
+
+  // Each button drives its own kind of recording.
+  audioBtn.addEventListener('click', function () {
+    var recordingAudio = audioBtn.getAttribute('data-on') === '1';
+    post(recordingAudio ? '/record/audio/stop' : '/record/audio/start', audioBtn);
+  });
+
+  videoBtn.addEventListener('click', function () {
+    var recordingVideo = videoBtn.getAttribute('data-on') === '1';
+    post(recordingVideo ? '/record/video/stop' : '/record/video/start', videoBtn);
+  });
+
+  function poll() {
+    fetch('/status').then(function (r) { return r.json(); }).then(function (s) {
+      var live = !!s.streaming;
+      var feed = s.feed || (live ? 'running' : 'stopped');
+      streamDot.className = 'dot ' + (feed === 'running' ? 'on' : 'off');
+      streamState.textContent = feed === 'running'
+        ? 'Live stream: running'
+        : (feed === 'paused'
+            ? 'Live stream: paused while recording'
+            : 'Live stream: stopped');
+      fragments = s.fragments || 0;
+      serverError = s.error || '';
+
+      var mode = s.recordingMode || '';
+      var audioOn = mode === 'audio';
+      var videoOn = mode === 'video';
+
+      audioBtn.setAttribute('data-on', audioOn ? '1' : '0');
+      if (!audioBtn.disabled) {
+        audioBtn.textContent = audioOn ? 'Stop audio recording' : 'Start audio recording';
+      }
+      audioBtn.className = audioOn ? 'audio stop' : 'audio';
+
+      videoBtn.setAttribute('data-on', videoOn ? '1' : '0');
+      if (!videoBtn.disabled) {
+        videoBtn.textContent = videoOn ? 'Stop video recording' : 'Start video recording';
+      }
+      videoBtn.className = videoOn ? 'stop' : '';
+
+      recState.textContent = !s.recording ? 'Recorder: idle'
+        : (mode === 'audio' ? 'Recorder: audio recording' : 'Recorder: video recording')
+          + (s.paused ? ' (paused)' : '');
+
+      if (s.build) {
+        streamState.title = 'Build ' + s.build;
+      }
+
+      renderInfo();
+
+      if (live) loadStream(s.initId || '');
+      else lastInit = '';
+    }).catch(function () {
+      hint.textContent = 'Lost contact with the phone.';
+    });
+  }
+
+  poll();
+  setInterval(poll, 1500);
+})();
+</script>
+</body>
+</html>

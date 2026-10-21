@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The release build ships under the real product name. -->
+    <string name="app_name">Recorder by Alex</string>
+</resources>

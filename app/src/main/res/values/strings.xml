@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Recorder by Alex</string>
+    <string name="record">Record</string>
+    <string name="stop">Stop</string>
+    <string name="pause">Pause</string>
+    <string name="resume">Resume</string>
+    <string name="paused_prefix">Paused %1$s</string>
+    <string name="starting_recording">Starting…</string>
+    <string name="switch_camera">Flip</string>
+    <string name="settings">Settings</string>
+    <string name="zoom_in">+</string>
+    <string name="zoom_out">−</string>
+
+    <string name="mode_audio">Audio</string>
+    <string name="mode_video">Video</string>
+    <string name="audio_mode_title">Audio recording</string>
+    <string name="audio_mode_hint">Saves to Music/Recorder/Audio — keeps recording in the background</string>
+
+    <string name="streaming_off">Live stream: OFF</string>
+    <string name="streaming_on">Live stream: ON</string>
+    <string name="streaming_hint">Serves a dashboard on this phone so you can watch the camera live and start or stop the recording from a browser on the same Wi-Fi. The video feed works in either mode.</string>
+    <string name="streaming_not_ready_on">Live stream is being set up — the server is not ready yet</string>
+    <string name="streaming_not_ready_off">Live stream is off</string>
+    <string name="streaming_not_ready">The recorder is still starting…</string>
+    <string name="streaming_failed">Could not start the live server</string>
+    <string name="streaming_failed_reason">Could not start the live server (no free port)</string>
+    <string name="url_copied">Link copied to the clipboard</string>
+    <string name="no_browser">No browser installed</string>
+    <string name="settings_title">Settings</string>
+    <string name="settings_server">Live dashboard</string>
+    <string name="url_placeholder">Starting…</string>
+    <string name="copy">Copy</string>
+    <string name="open_in_browser">Open</string>
+    <string name="settings_audio">Audio</string>
+    <string name="settings_audio_desc">192 kbps / 48 kHz AAC → Music/Recorder/Audio</string>
+    <string name="settings_video">Video</string>
+    <string name="settings_video_desc">HD (1280x720) → Movies/Recorder/Camera</string>
+    <string name="settings_keep_alive">Keep the phone awake</string>
+    <string name="settings_keep_alive_desc">Lets the phone put this app to sleep. Without this the live dashboard can stop answering while the app is closed - the buttons on the website then only work after the app is opened.</string>
+    <string name="settings_keep_alive_button">Allow the app to run in the background</string>
+    <string name="keep_alive_done">Done - the app may now run in the background</string>
+    <string name="keep_alive_failed">Could not open the system settings</string>
+    <string name="close">Close</string>
+
+    <string name="starting">Camera is still starting…</string>
+    <string name="stop_first">Stop recording first</string>
+    <string name="need_mic">Microphone permission is required</string>
+    <string name="need_camera">Camera permission is required for video mode</string>
+
+    <string name="notif_channel">Recording</string>
+    <string name="notif_channel_desc">Keeps recording while the app is in the background or the screen is off</string>
+    <string name="notif_ready">Ready — recording continues in the background</string>
+    <string name="notif_recording">Recording video in background…</string>
+    <string name="notif_recording_audio">Recording audio in background…</string>
+    <string name="notif_streaming">Live stream running</string>
+    <string name="notif_streaming_url">Live stream running — %1$s</string>
+    <string name="notif_paused">Paused — tap Resume to keep recording</string>
+    <string name="notif_stop">Stop</string>
+</resources>

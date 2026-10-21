@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Overlay colours for text sitting on top of the camera preview. -->
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="scrim">#99000000</color>
+    <color name="ic_launcher_background">#ffffff</color>
+
+    <!--
+        Material 3 baseline (dark) system colours. These are only the fallback:
+        on Android 12+ the dynamic colour scheme derived from the user's
+        wallpaper replaces them at runtime.
+    -->
+    <color name="m3_primary">#D0BCFF</color>
+    <color name="m3_on_primary">#381E72</color>
+    <color name="m3_primary_container">#4F378B</color>
+    <color name="m3_on_primary_container">#EADDFF</color>
+
+    <color name="m3_secondary">#CCC2DC</color>
+    <color name="m3_on_secondary">#332D41</color>
+    <color name="m3_secondary_container">#4A4458</color>
+    <color name="m3_on_secondary_container">#E8DEF8</color>
+
+    <color name="m3_tertiary">#EFB8C8</color>
+
+    <color name="m3_error">#F2B8B5</color>
+    <color name="m3_on_error">#601410</color>
+    <color name="m3_error_container">#8C1D18</color>
+    <color name="m3_on_error_container">#F9DEDC</color>
+
+    <color name="m3_surface">#141218</color>
+    <color name="m3_on_surface">#E6E0E9</color>
+    <color name="m3_surface_variant">#49454F</color>
+    <color name="m3_on_surface_variant">#CAC4D0</color>
+    <color name="m3_outline">#938F99</color>
+</resources>
