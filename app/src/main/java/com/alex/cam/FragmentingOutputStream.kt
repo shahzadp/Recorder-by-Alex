@@ -158,10 +158,23 @@ internal class FragmentingOutputStream(
     }
 
     /**
-     * Adds the `tfdt` box with the time of the first sample.
+     * Makes the fragment fit for a browser.
      *
-     * It goes into the track fragment, right behind the track header, and the
-     * times of the following fragments follow from the sample durations.
+     * Two things are done to the `moof` box:
+     *
+     * 1. The **`tfdt`** box with the time of the first sample is added. The
+     *    muxer does not write one, so a fragment carries no absolute time of
+     *    its own - and a player that gets the fragments one by one (instead
+     *    of as one continuous stream) cannot place them on a timeline.
+     *
+     * 2. The **base data offset** is taken out of the `tfhd` box. The muxer
+     *    writes it, because in a file it is the place of the `moof` box in
+     *    the stream. A browser does not accept that: the media source
+     *    extensions want the fragment to be addressed relative to its own
+     *    `moof` box, and they refuse a stream that carries a base data
+     *    offset with the message *"TFHD base-data-offset not allowed by
+     *    MSE"*. So the flag is cleared, the field is dropped, and the
+     *    "default base is moof" flag takes its place.
      */
     private fun addDecodeTime(moof: ByteArray): ByteArray {
         val traf = findChild(moof, 8, moof.size, "traf")
@@ -169,7 +182,9 @@ internal class FragmentingOutputStream(
         val trafEnd = traf + readInt(moof, traf).toInt()
         val tfhd = findChild(moof, traf + 8, trafEnd, "tfhd")
         if (tfhd < 0) return moof
-        val insertAt = tfhd + readInt(moof, tfhd).toInt()
+        val tfhdEnd = tfhd + readInt(moof, tfhd).toInt()
+        val trun = findChild(moof, traf + 8, trafEnd, "trun")
+        if (trun < 0) return moof
 
         // The durations of the samples say how long this fragment is.
         val durations = sumSampleDurations(moof, traf, trafEnd)
@@ -178,18 +193,49 @@ internal class FragmentingOutputStream(
         // The length in milliseconds, so that the playlist can tell the player
         // how long the segment really is.
         fragmentDuration = ((durations * 1000L) / timescale).toInt()
+
+        // The flags of the track fragment header, and whether it carries the
+        // base data offset that has to go.
+        val tfhdFlagsOffset = tfhd + 8
+        val tfhdFlags = readInt(moof, tfhdFlagsOffset).toInt() and 0x00FFFFFF
+        val hasBaseDataOffset = (tfhdFlags and TFHD_BASE_DATA_OFFSET) != 0
+        val droppedBytes = if (hasBaseDataOffset) 8 else 0
+
+        // The new track fragment header: the same box without the base data
+        // offset, and with the flag that says the base is the moof box.
+        val tfhdSize = readInt(moof, tfhd).toInt()
+        val newTfhdSize = tfhdSize - droppedBytes
+        // What is left of the box after the track id - and after the base
+        // data offset, when that one is dropped. The layout of the box is:
+        //   size | "tfhd" | version and flags | track id | base data offset
+        // and the base data offset is eight bytes long.
+        val tailFrom = if (droppedBytes == 0) 16 else 24
+        val tailLength = tfhdSize - tailFrom
+        val tfhdBytes = ByteArray(newTfhdSize)
+        writeInt(tfhdBytes, 0, newTfhdSize)
+        System.arraycopy(moof, tfhd + 4, tfhdBytes, 4, 4)          // "tfhd"
+        System.arraycopy(moof, tfhd + 8, tfhdBytes, 8, 4)          // version and flags
+        System.arraycopy(moof, tfhd + 12, tfhdBytes, 12, 4)        // the track id
+        if (tailLength > 0) {
+            System.arraycopy(moof, tfhd + tailFrom, tfhdBytes, 16, tailLength)
+        }
+        // The new flags: no base data offset, but the base is the moof box.
+        val newFlags = (tfhdFlags and TFHD_BASE_DATA_OFFSET.inv()) or TFHD_DEFAULT_BASE_IS_MOOF
+        writeInt(tfhdBytes, 8, newFlags)
+
         val out = ByteArrayOutputStream(moof.size + tfdt.size)
-        out.write(moof, 0, insertAt)
-        out.write(tfdt)
-        out.write(moof, insertAt, moof.size - insertAt)
+        out.write(moof, 0, tfhd)                               // up to the tfhd
+        out.write(tfhdBytes)                                   // the new tfhd
+        out.write(tfdt)                                        // the new tfdt
+        out.write(moof, tfhdEnd, moof.size - tfhdEnd)           // the rest
 
         val body = out.toByteArray()
-        // The traf grew - the sizes have to follow.
-        writeInt(body, traf, (trafEnd - traf) + tfdt.size)
+        // The traf changed: the tfhd shrank and the tfdt was added.
+        writeInt(body, traf, (trafEnd - traf) - droppedBytes + tfdt.size)
         writeInt(body, 0, body.size)
-        // The data of the samples moved as well: the offsets that point to it
-        // have to follow, or the player reads rubbish.
-        fixDataOffsets(body, traf, trafEnd + tfdt.size, tfdt.size)
+        // The sample data moved as well: the offset that points to it has to
+        // follow, or the player reads rubbish.
+        fixDataOffsets(body, traf, trafEnd - droppedBytes + tfdt.size, tfdt.size - droppedBytes)
         return body
     }
 
@@ -311,6 +357,10 @@ internal class FragmentingOutputStream(
         const val TRUN_SAMPLE_SIZE = 0x000200
         const val TRUN_SAMPLE_FLAGS = 0x000400
         const val TRUN_SAMPLE_OFFSET = 0x000800
+
+        // The flags of a "tfhd" box (ISO/IEC 14496-12).
+        const val TFHD_BASE_DATA_OFFSET = 0x000001
+        const val TFHD_DEFAULT_BASE_IS_MOOF = 0x020000
     }
 }
 

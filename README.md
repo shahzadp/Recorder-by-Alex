@@ -63,7 +63,7 @@ reserved for system apps on modern Android (`CAPTURE_AUDIO_OUTPUT` is
 ## Layout
 
 ```
-app/src/main/java/com/alex/recorder/
+app/src/main/java/com/alex/cam/
   MainActivity.kt              viewfinder, mode switch, timer, zoom
   RecordingService.kt          camera + audio capture, foreground service
   RecorderApp.kt               Material 3 dynamic colours, crash log
@@ -73,9 +73,13 @@ app/src/main/java/com/alex/recorder/
   LiveStreamServer.kt          the HTTP server (written from scratch)
   LiveStreamEndpoints.kt       the dashboard routes
   LiveStreamEncoder.kt         camera frames -> H.264 -> fragmented MP4
+  H264Encoder.kt               the H.264 encoder (the camera's YUV planes)
   FragmentingOutputStream.kt   splits the MP4 into init segment and fragments
   HlsStreamBuffer.kt           the rolling window of fragments
   AvcCodecConfig.kt            unpacks the codec specific data of the encoder
+  YuvConverter.kt              YUV_420_888 -> a flat I420 buffer
+analysis/legacy-com.alex.recorder.beta/
+                              the reverse-engineering archive of the old beta
 ```
 
 
@@ -103,23 +107,32 @@ logcat.
 The dashboard also shows the reason in red if anything fails, and the build id
 of the app that is running, so it is always clear which APK is on the phone.
 
-How the feed is produced: `ImageAnalysis` (YUV) → `MediaCodec` H.264
-640x480@15 → media3 `FragmentedMp4Muxer` → a `FragmentingOutputStream` that
-splits it into an `ftyp`+`moov` init segment and `moof`+`mdat` fragments,
-kept in a 15 segment rolling window.
+How the feed is produced: `ImageAnalysis` (YUV) → `H264Encoder` (the camera's
+planes go into a hardware H.264 encoder as real YUV) → media3
+`FragmentedMp4Muxer` → a `FragmentingOutputStream` that splits it into an
+`ftyp`+`moov` init segment and `styp`+`moof`+`mdat` fragments, kept in a 15
+segment rolling window.
 
 A few things about that chain are worth knowing, because every one of them
 cost a debugging session:
 
-* The **encoder is picked by hand** (`MediaCodecList`), because
-  `createEncoderByType` happily returns a codec that only accepts a `Surface`
-  input - and a surface cannot be filled by hand.
+* The **encoder is picked by hand** (`MediaCodecList`) and its
+  `KEY_COLOR_FORMAT` is set. Without that the codec is set up for a YUV
+  buffer - and the picture has to go in as YUV as well. A canvas drawn into
+  the encoder's surface is nothing a hardware encoder can read: it answers with
+  a valid, but empty, video track.
+* The frames are copied **plane by plane**, with the row and pixel strides the
+  codec asks for (`codec.getInputImage()`). An encoder that gets misaligned
+  rows answers with green bands, or with nothing at all.
 * The **codec specific data** is unpacked the way media3 wants it: the SPS and
   the PPS as two entries, each behind an Annex-B start code. Android delivers
   them in its own "csd" format (`AvcCodecConfig` does the unpacking).
 * The **timeline is built by the app**, not taken from the camera: the
   camera's timestamps occasionally jump, and one jump makes a sample duration
   too big for the 32 bit MP4 field.
+* The **picture is turned upright by the camera**
+  (`setOutputImageRotationEnabled`), so the dashboard shows it the way the
+  phone is held.
 * The **muxer is fed through a channel**, not through the deprecated
   `OutputStream` constructor - that one makes a seekable muxer, which holds the
   fragments back until the file is closed. A live stream never closes.
@@ -127,6 +140,10 @@ cost a debugging session:
   its own - and a player that receives the fragments one by one cannot place
   them on a timeline. The splitter therefore adds the missing `tfdt` to every
   fragment, with the time that follows from the sample durations before it.
+* The splitter also **takes the base data offset out of the `tfhd` box**. The
+  muxer writes one, because in a file it is the place of the `moof` in the
+  stream; a browser refuses it with *"TFHD base-data-offset not allowed by
+  MSE"*. The fragment is addressed relative to its own `moof` instead.
 * A playlist counts its segments **from zero**, so the times inside the
   fragments have to be relative to the oldest segment of the window - and that
   one changes every time the window slides. The buffered fragments are
@@ -151,10 +168,11 @@ Behaviour worth knowing:
   alone while the app is closed. The viewfinder is only bound while the app
   actually shows it: a preview without a surface would keep the camera waiting
   for frames that never arrive.
-* The stream and the recorder compete for the camera's YUV stream, so the live
-  view pauses while a recording runs and resumes when it stops. If the device
-  cannot do both at once, the app falls back to recording only and the
-  dashboard says so.
+* **The live view keeps running during a recording.** The camera is bound with
+  the recorder *and* the analysis, so the dashboard shows the recording while it
+  is being made. A phone that cannot serve both refuses the binding - then the
+  feed waits and comes back when the recording is done, and the dashboard says
+  so instead of pretending everything is fine.
 * **Settings → "Keep the phone awake"** asks the system to stop putting the app
   to sleep. Without it, some phones freeze the app in the background: the
   dashboard then only answers after the app is opened. The live stream is

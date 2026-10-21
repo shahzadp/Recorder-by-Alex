@@ -38,5 +38,5 @@ object Constants {
      * It is shown on the dashboard, so it is always clear which APK is
      * actually running on the phone.
      */
-    const val BUILD_ID = "2026-10-21 06:20"
+    const val BUILD_ID = "2026-10-22 02:35 rotfix"
 }

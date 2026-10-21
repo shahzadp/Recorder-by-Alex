@@ -11,6 +11,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.hardware.display.DisplayManager
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Binder
@@ -23,6 +24,8 @@ import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import android.util.Size
+import android.view.Display
+import android.view.Surface
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.CameraState
@@ -93,6 +96,12 @@ class RecordingService : Service(), LifecycleOwner {
         private const val START_RETRIES = 10
         private const val START_RETRY_DELAY_MS = 500L
         private const val ZOOM_STEP = 0.1f
+
+        /**
+         * How long the live feed may be without a frame before the dashboard
+         * is told that it is paused.
+         */
+        private const val FEED_STALL_MS = 2_000L
     }
 
     /** UI-facing handles. All calls happen on the main thread. */
@@ -459,11 +468,12 @@ class RecordingService : Service(), LifecycleOwner {
         val selector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
         val analysis = imageAnalysis
         val capture = videoCapture
-        // The recorder needs the camera for itself: this phone cannot serve
-        // the recorder and the live feed at the same time, and when it tries,
-        // the recording is the one that breaks. The live feed waits for the
-        // recorder and comes back afterwards.
-        val wantCapture = mode == Mode.VIDEO && analysis == null
+        // The recorder and the live feed both want the camera. A phone that
+        // can serve two streams gets both of them - then the dashboard shows
+        // the recording while it is being made. A phone that cannot refuses
+        // the binding, and the recording wins: the feed waits and comes back
+        // when the recording is done.
+        val wantCapture = mode == Mode.VIDEO
         val wantPreview = wantCapture || (viewfinderVisible && mode == Mode.VIDEO)
 
         val useCases = ArrayList<UseCase>(3)
@@ -479,6 +489,9 @@ class RecordingService : Service(), LifecycleOwner {
 
         try {
             provider.unbindAll()
+            // The phone may have been turned since the last binding, so the
+            // pictures are told again which way is up.
+            imageAnalysis?.setTargetRotation(currentDisplayRotation())
             val bound = try {
                 provider.bindToLifecycle(this, selector, *useCases.toTypedArray())
             } catch (e: Exception) {
@@ -616,13 +629,14 @@ class RecordingService : Service(), LifecycleOwner {
 
             override fun onFrame() {
                 streamFrames++
+                lastStreamFrameAt = SystemClock.elapsedRealtime()
             }
 
-            override fun onFragment(sequence: Int, bytes: ByteArray, durationMs: Long, session: Int) {
+            override fun onFragment(sequence: Int, bytes: ByteArray, durationMs: Long, sessionId: Int) {
                 // A fragment of an older session belongs to another track -
                 // the player would mix the pictures of two sessions and show
                 // nothing.
-                if (session != streamSession) return
+                if (sessionId != streamSession) return
                 // Every encoder session numbers its fragments on its own, so
                 // the number gets the session in front of it - that way the
                 // fragments of two sessions can never be mixed up.
@@ -664,6 +678,11 @@ class RecordingService : Service(), LifecycleOwner {
                     .build()
             )
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            // The camera hands the pictures over the way the sensor sees
+            // them - lying on their side. The rotation turns them the way
+            // the phone is held, so the dashboard shows them upright.
+            .setOutputImageRotationEnabled(true)
+            .setTargetRotation(currentDisplayRotation())
             .build()
         analysis.setAnalyzer(streamExecutor) { image ->
             // Counted before the encoder, so it is clear whether the camera
@@ -697,8 +716,19 @@ class RecordingService : Service(), LifecycleOwner {
         if (!isRecording()) bindUseCases()
     }
 
-    private fun localIpAddress(): String {
-        val wifi = runCatching {
+    /**
+     * The way the display is turned right now.
+     *
+     * The camera hands the pictures over the way the sensor sees them, and
+     * the sensor lies on its side. This is the turn that brings them the way
+     * the phone is held - and the way the recording is turned.
+     */
+    private fun currentDisplayRotation(): Int {
+        val displays = getSystemService(DisplayManager::class.java) ?: return Surface.ROTATION_0
+        return displays.getDisplay(Display.DEFAULT_DISPLAY)?.rotation ?: Surface.ROTATION_0
+    }
+
+    private fun localIpAddress(): String {        val wifi = runCatching {
             java.net.NetworkInterface.getNetworkInterfaces().toList()
                 .filter { it.name.startsWith("wlan") || it.name.startsWith("ap") }
                 .flatMap { it.inetAddresses.toList() }
@@ -728,12 +758,13 @@ class RecordingService : Service(), LifecycleOwner {
             })
             json.put("paused", paused)
             json.put("streaming", isLiveStreamRunning())
-            // The feed waits for the recorder - that is not the same as it
-            // being broken, and the dashboard should say so.
+            // The feed runs next to the recording now, so "a recording is
+            // running" does not mean "the feed is paused" any more. Only the
+            // frames tell the truth.
             json.put(
                 "feed",
                 when {
-                    isRecording() -> "paused"
+                    isFeedActuallyPaused() -> "paused"
                     isLiveStreamRunning() -> "running"
                     else -> "stopped"
                 }
@@ -781,7 +812,7 @@ class RecordingService : Service(), LifecycleOwner {
 
         override fun isStreaming(): Boolean = isLiveStreamRunning()
 
-        override fun isFeedPaused(): Boolean = isRecording()
+        override fun isFeedPaused(): Boolean = isFeedActuallyPaused()
 
         override fun initSegment(): ByteArray? = hlsBuffer.initSegment()
 
@@ -794,6 +825,25 @@ class RecordingService : Service(), LifecycleOwner {
 
     private fun isLiveStreamRunning(): Boolean =
         streamEncoder != null && hlsBuffer.initSegment() != null
+
+    /**
+     * True when the feed really is not running.
+     *
+     * A recording used to switch the feed off, so "a recording is running"
+     * meant "the feed is paused". Now the feed keeps running next to the
+     * recording, so the dashboard is told the truth: the feed is only paused
+     * when the camera stopped handing out frames.
+     */
+    private fun isFeedActuallyPaused(): Boolean {
+        if (!isRecording()) return false
+        val last = lastStreamFrameAt
+        if (last == 0L) return true
+        return SystemClock.elapsedRealtime() - last > FEED_STALL_MS
+    }
+
+    /** When the live encoder got its last frame. */
+    @Volatile
+    private var lastStreamFrameAt = 0L
 
     // --------------------------------------------------------------------- zoom
 
@@ -922,7 +972,15 @@ class RecordingService : Service(), LifecycleOwner {
             // it tries, the recording is the one that breaks. The feed waits
             // and comes back when the recording is done.
             mode = Mode.VIDEO
-            if (streamEncoder != null) stopStreamEncoder()
+            if (streamEncoder != null) {
+                // The live feed keeps running. The camera is bound again with
+                // the recorder *and* the analysis, so the dashboard shows the
+                // recording while it is being made. A phone that cannot serve
+                // both refuses the binding, and the fallback in bindUseCases
+                // drops the analysis - then the feed waits.
+                streamUnavailable = false
+                bindUseCases()
+            }
             if (videoCapture == null) {
                 // The camera is still coming up - start as soon as it is ready.
                 pendingStart = Mode.VIDEO
@@ -982,10 +1040,11 @@ class RecordingService : Service(), LifecycleOwner {
     private fun startRecordingOf(target: Mode) {
         if (isRecording()) return
         try {
-            // The stream and the recorder both need the camera's YUV stream, so
-            // the stream steps aside for a video recording. An audio recording
-            // needs no camera, so the stream can keep running.
-            if (target == Mode.VIDEO && streamEncoder != null) stopStreamEncoder()
+            // The live feed and the recorder both want the camera, so the
+            // camera is bound with both of them (see bindUseCases). A phone
+            // that cannot serve both drops the feed - the recording wins.
+            // An audio recording needs no camera, so the stream can keep
+            // running.
             // Set the service type up for what is about to be captured.
             goForeground(target)
             acquireWakeLock()

@@ -81,8 +81,15 @@ kdeconnect-cli -n "itel S25" --share "D:\GitHub-Projects\Recorder-by-Alex\Record
   app shows it.
 - The encoder on this phone is `c2.unisoc.avc.encoder`; `MediaCodec.createEncoderByType`
   happily returns a codec that cannot be fed with byte buffers at all.
+- That encoder takes **`COLOR_FormatYUV420SemiPlanar`** (21) and hands out its
+  input as an image with the real strides — `getInputImage()` works, and the
+  planes are copied into it one by one.
+- **The camera CAN serve the recorder and the analysis at the same time** — the
+  feed runs next to the recording (section 4). The older note that it could
+  not was about the *surface* input, not about the number of streams.
 - `Surface.setFrameTimestamp` is a **hidden API** — with a surface input the
-  frame times come from the system clock and cannot be overridden.
+  frame times come from the system clock and cannot be overridden. The public
+  way is `EGLExt.eglPresentationTimeANDROID()` on an EGL surface.
 - The logcat on the itel is flooded by system DNS spam; capture it live to a
   file rather than with `logcat -d`.
 
@@ -91,12 +98,12 @@ kdeconnect-cli -n "itel S25" --share "D:\GitHub-Projects\Recorder-by-Alex\Record
 ## 4. Architecture of the live feed
 
 ```
-camera ─→ ImageAnalysis ─→ MediaCodec (H.264, surface input) ─→ media3 FragmentedMp4Muxer
-                                                                      │
-                                              ┌───────────────────────┴────────────────────┐
-                                          ftyp+moov (init)                        moof+mdat (fragments)
-                                                │                                       │
-                                          /init.mp4                            /seg-N.m4s + /live.m3u8
+camera ─→ ImageAnalysis (YUV_420_888) ─→ H264Encoder (MediaCodec, byte buffer) ─→ media3 FragmentedMp4Muxer
+                                                                                        │
+                                                                ┌───────────────────────┴────────────────────┐
+                                                            ftyp+moov (init)                        moof+mdat (fragments)
+                                                                  │                                       │
+                                                            /init.mp4                            /seg-N.m4s + /live.m3u8
 ```
 
 - The muxer is fed through a **`WritableByteChannel`**, not the deprecated
@@ -110,6 +117,38 @@ camera ─→ ImageAnalysis ─→ MediaCodec (H.264, surface input) ─→ medi
 - The **player is bundled** (`res/raw/hls_min.js`, hls.js 1.5.17, Apache-2.0) so
   the dashboard works on a phone without internet.
 
+### The frames go in as YUV, not as a picture
+
+`H264Encoder` hands the **planes of the camera frame** to the encoder, one by
+one, with the row and pixel strides the codec asks for. It does **not** draw a
+bitmap into the encoder's input surface any more — that was the reason for the
+black screen (section 5, bug 12).
+
+- The codec is picked by name and **its `KEY_COLOR_FORMAT` is set** — without
+  that the codec is set up for a YUV buffer, and a canvas is nothing it can
+  read.
+- The normal path uses `codec.getInputImage()` and copies the planes into it,
+  which is the only way to get the strides right. The fallback packs the frame
+  by hand (NV12, or I420 for the codecs that only take the planar one).
+- The **timeline is built by the app** (one frame after the other), because the
+  camera's timestamps jump on this phone.
+
+### The picture is turned upright by the camera
+
+`ImageAnalysis.setOutputImageRotationEnabled(true)` with the target rotation
+of the display: the camera hands the pictures over the way the sensor sees
+them (lying on their side) and the analysis turns them. The encoder takes the
+size of the first frame, so a turned picture (480x640) works without anything
+else.
+
+### The feed runs next to the recording
+
+The camera is bound with the recorder **and** the analysis, so the dashboard
+shows the recording while it is being made. A phone that cannot serve both
+refuses the binding, and the fallback drops the analysis — then the feed waits
+and comes back afterwards. The dashboard is told the truth: the feed is only
+"paused" when the camera stopped handing out frames.
+
 ### The planned architecture (the user's request)
 
 > "live should only start when I press start video recording"
@@ -119,6 +158,29 @@ written to the file *and* to the fragments. Then the feed shows exactly what is
 being recorded, never pauses, and only exists while recording. `LiveRecorder.kt`
 is written for this (video + AAC audio → one muxer → teed to file + splitter);
 it is **not wired into the service yet**.
+
+### What the reference project does differently
+
+`github.com/DigitallyRefined/android-ip-camera` was read for this. It solves
+the same problem and is worth knowing:
+
+- The camera renders **directly into the encoder's surface** through a GL pipe
+  (`CameraGlPipe`: SurfaceTexture → EGL → the encoder's input surface), with
+  `EGLExt.eglPresentationTimeANDROID()` for the timestamps. That is the public
+  answer to the "hidden API" `Surface.setFrameTimestamp` in section 3.
+- Its byte-buffer path is the one this app now uses: `getInputImage()` plus a
+  stride-aware copy, with NV12/I420 chosen from the codec's own caps. Its
+  comment says it plainly: *"tight-packed buffer input is exactly what some
+  hardware encoders reject (misaligned rows, green/garbled bands)"*.
+- It serves **raw Annex-B H.264 over HTTP** and plays it with **WebCodecs**
+  (`VideoDecoder`), not with HLS. No container, no MSE, no mp4box.js — which is
+  why it never ran into the `tfhd` problem below. The price is that it needs
+  HTTPS (WebCodecs needs a secure context).
+- Its recording and its live stream are **the same encoder**: the recording
+  taps the drain loop, so the camera only ever serves one stream. This app
+  keeps CameraX's recorder for the file and binds the analysis next to it,
+  which is the same idea without rewriting the recording.
+
 
 ---
 
@@ -148,11 +210,27 @@ Every one of these was a real bug, found by byte-level inspection:
     length from `EXTINF`.
 11. **`init_id` / `trex` / track id** mismatches made the player refuse the
     stream.
+12. **The picture was drawn into the encoder's input surface.** The codec was
+    picked for a YUV layout but never told about it (`KEY_COLOR_FORMAT` was
+    missing), and a hardware encoder cannot read a canvas — so it produced a
+    valid, but empty, video track. → `H264Encoder` feeds the real YUV planes.
+13. **The `tfhd` box carried a base data offset.** media3 writes it, because in
+    a file it is the place of the `moof` in the stream. A browser refuses it:
+    *"TFHD base-data-offset not allowed by MSE"*. The media source extensions
+    want the fragment addressed relative to its own `moof`. → the flag is
+    cleared, the field is dropped, and "default base is moof" takes its place.
+
+**Bug 13 was the one that kept the preview black.** The container, the track
+ids, the data offset and the SPS had all been verified correct, and the raw
+H.264 was perfect — but the browser never got past the `moof`. The only way to
+find it was to let the browser say it: the `video` element carries the reason
+in `video.error`, and it names the box.
 
 Tools that made this possible: **ffprobe** (container/track inspection),
-**ffmpeg `-bsf:v trace_headers`** (SPS field by field), and the **browser
-tool** (load the dashboard, read hls.js's own log, decode a frame into a canvas
-and measure its brightness — the only way to tell "black" from "not playing").
+**ffmpeg `-bsf:v trace_headers`** (SPS field by field), **a box dumper** (the
+`moof` byte by byte, to see the `tfhd` flags and the `trun` data offset), and
+the **browser tool** (load the dashboard and read `video.error` — the browser
+names the box that it does not accept, which is what finally ended the hunt).
 
 ---
 
@@ -176,6 +254,11 @@ its own battery exemption, so uninstall it before testing this build.
 - Dashboard → **audio recording** ✅ (app closed, file written)
 - Dashboard → **video recording** ✅ (app closed, ~6.5 MB per 10 s, clean finalize)
 - Remote start/stop, the HLS server, the playlist, the segments, the init segment ✅
+- **The live preview shows the picture** ✅ — the black screen is gone (the
+  `tfhd` base data offset was the reason, section 5 bug 13)
+- **The feed runs while a video recording runs** ✅ — the camera is bound with
+  the recorder and the analysis together
+- The picture is **upright** ✅ (the analysis turns it, section 4)
 - The feed restarts cleanly after a recording, with a fresh init segment ✅
 - The package rename to `com.alex.cam`, the file prefix `Recorder_Std_*.mp4` ✅
 - The crash log (`RecorderApp`) and the status diagnostics
@@ -183,12 +266,11 @@ its own battery exemption, so uninstall it before testing this build.
 
 ### Broken / open
 
-- **The live preview is black.** The container, the track ids, the data offset
-  and the SPS were all verified correct with ffprobe/ffmpeg; the raw H.264 still
-  will not decode. The `csd` fix (build0620) is the newest attempt — **it has
-  not been tested on the phone yet.**
-- **The feed pauses during a recording** — a consequence of the camera serving
-  one consumer. The fix is the app owning the encoder (section 4).
+- Once, right after the app was updated, the status showed **"a frame could
+  not be muxed: ...getClass() on a null object reference"** and no fragment was
+  published. It did not come back and the feed worked after that, so it was
+  probably the encoder being rebuilt while the service restarted — but it was
+  **not explained**. Watch for it: a single bad sample must not stop the feed.
 - The old `com.alex.recorder` app may still be installed on the phone: uninstall
   it, it keeps port 8080 and the old battery exemption.
 
@@ -196,21 +278,16 @@ its own battery exemption, so uninstall it before testing this build.
 
 ## 7. To-do
 
-1. **Install `build0620`** and check the live preview. If the picture is there,
-   the `csd` fix was it.
-2. If it is still black: implement the **app's own recorder**
-   (`LiveRecorder` → `RecordingService`):
-   - the analysis feeds the encoder, the camera binds **only** the analysis
-   - the mic via `AudioRecord` → the AAC encoder → the same muxer
-   - the muxer's bytes tee to the MediaStore file **and** the HLS splitter
-   - the feed starts with the recording and stops with it (the user's request)
-   - keep CameraX's recorder as a fallback until the new path is proven
+1. **Watch the live feed during a long recording** — the camera is bound with
+   two streams now, and the itel has to serve both.
+2. The **app's own recorder** (`LiveRecorder` → `RecordingService`) is still not
+   wired in: the recording is still CameraX's own, at 720p, while the feed is
+   480p. One encoder for both would make the feed and the file the same
+   pictures — and would let the feed start and stop with the recording (the
+   user's request, section 4).
 3. Grant **"Keep the phone awake"** on the new package.
-4. Move the live feed from `LiveStreamEncoder` to the recorder (the feed must not
-   start when the server starts).
-5. Re-check the rotation (the app's own encoder has to rotate the picture
-   itself) and the pause/resume of the recording.
-6. Delete the stale APKs from the project folder; keep only the newest.
+4. The **pause/resume of the recording** while the feed runs.
+5. Delete the stale APKs from the project folder; keep only the newest.
 
 ---
 

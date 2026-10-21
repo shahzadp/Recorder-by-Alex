@@ -188,6 +188,49 @@ class FragmentingOutputStreamTest {
         assertEquals("the offset must point at the sample data", mdat + 8, moof + dataOffset)
     }
 
+    @Test
+    fun theFragmentIsAddressedRelativeToItsOwnBox() {
+        // A browser refuses a stream that carries a base data offset:
+        //   "TFHD base-data-offset not allowed by MSE"
+        // The muxer writes one, because in a file it is the place of the
+        // moof box in the stream. A browser wants the fragment to be
+        // addressed relative to its own moof box, so the base data offset
+        // has to go and the "default base is moof" flag takes its place.
+        val fragments = ArrayList<ByteArray>()
+        val stream = FragmentingOutputStream(
+            onInit = { },
+            onFragment = { _, bytes, _ -> fragments.add(bytes) }
+        )
+        stream.write(box("ftyp", ByteArray(16)))
+        stream.write(moov())
+        stream.write(moofWithData(6000))
+        stream.flush()
+
+        val fragment = fragments[0]
+        val tfhd = indexOf(fragment, "tfhd")
+        assertTrue("the fragment must carry a tfhd", tfhd >= 0)
+
+        val flags = readInt(fragment, tfhd + 8) and 0x00FFFFFF
+        assertEquals(
+            "the base data offset must not be there any more",
+            0, flags and 0x000001
+        )
+        assertEquals(
+            "the base of the fragment has to be its own moof box",
+            0x020000, flags and 0x020000
+        )
+
+        // The track id has to survive the change.
+        assertEquals("the track id", 1, readInt(fragment, tfhd + 12))
+
+        // And the box has to be shorter by the eight bytes of the base data
+        // offset, while the moof grew by the tfdt.
+        val original = moofWithData(6000)
+        val originalTfhd = indexOf(original, "tfhd")
+        val originalSize = readInt(original, originalTfhd)
+        assertEquals("the tfhd must be eight bytes shorter", originalSize - 8, readInt(fragment, tfhd))
+    }
+
     private fun readLong(bytes: ByteArray, offset: Int): Long {
         var value = 0L
         for (i in 0 until 8) {

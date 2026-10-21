@@ -1,19 +1,12 @@
 package com.alex.cam
 
-import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.media.MediaCodec
-import android.media.MediaCodecInfo
-import android.media.MediaCodecList
 import android.media.MediaFormat
-import android.os.SystemClock
 import android.util.Log
-import android.view.Surface
 import androidx.camera.core.ImageProxy
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
 import androidx.media3.muxer.FragmentedMp4Muxer
-import java.io.ByteArrayOutputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.channels.WritableByteChannel
@@ -25,13 +18,18 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Encodes the camera frames into HLS (fMP4) fragments for the live dashboard.
  *
  *   CameraX ImageAnalysis (YUV_420_888)
- *        -> converted to I420 and queued into a MediaCodec H.264 encoder that
- *           runs in byte buffer mode
+ *        -> H264Encoder: the planes of the frame go into a hardware H.264
+ *           encoder as real YUV
  *        -> media3 FragmentedMp4Muxer writes fMP4 into a FragmentingOutputStream
  *        -> that stream splits it into an init segment (ftyp+moov) and a series
  *           of media fragments (styp+moof+mdat)
  *
  * The server then serves /init.mp4, /seg-<n>.m4s and the rolling /live.m3u8.
+ *
+ * The frames used to be drawn into the encoder's input surface as a picture.
+ * That does not work: a hardware encoder reads YUV, not a canvas, so it
+ * produced an empty video track and the dashboard showed black. The encoder
+ * now takes the planes of the camera frame directly - see [H264Encoder].
  */
 class LiveStreamEncoder(
     /**
@@ -71,45 +69,33 @@ class LiveStreamEncoder(
     }
 
     private val running = AtomicBoolean(false)
-    private val lock = Any()
     private val drainExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
-    private var codec: MediaCodec? = null
+    private var encoder: H264Encoder? = null
     private var muxer: FragmentedMp4Muxer? = null
     private var fragmentStream: FragmentingOutputStream? = null
     private var trackIndex = -1
 
-    private var width = 0
-    private var height = 0
-    private var i420 = ByteArray(0)
-    private var rowScratch = ByteArray(0)
-
-    /** The row stride and the height the codec wants for one frame. */
-    private var stride = 0
-    private var sliceHeight = 0
-
-    /** The encoder that was picked, and the colour format it takes. */
-    private var encoderName: String? = null
-    private var colorFormat = 0
-
-    /** True when the codec wants the chroma planes woven together (NV12). */
-    private var semiPlanar = false
+    /** The frame the encoder was created for. */
+    private var frameWidth = 0
+    private var frameHeight = 0
 
     /** True once the init segment has been produced. */
     @Volatile
     var hasInitSegment: Boolean = false
         private set
 
-    /** Whether a key frame has been seen - media3 drops everything else. */
-    private var sawKeyFrame = false
-
     /** The frame counter that makes the timeline of the live feed. */
     private var frameIndex = 0L
 
-    /** How many key frames the encoder produced. */
-    @Volatile
-    var keyFrames: Int = 0
-        private set
+    /**
+     * The time of the last frame, in microseconds.
+     *
+     * The camera's own timestamps jump on this phone, and one jump makes a
+     * sample duration too big for the 32 bit field of the MP4 - so the
+     * timeline is built here, one frame after the other.
+     */
+    private var lastPtsUs = -1L
 
     /**
      * The average brightness of the last frame.
@@ -119,6 +105,16 @@ class LiveStreamEncoder(
      */
     @Volatile
     var averageLuma: Int = -1
+        private set
+
+    /** How many frames the camera handed over. */
+    @Volatile
+    var submittedFrames: Int = 0
+        private set
+
+    /** How many frames were dropped because the encoder was busy. */
+    @Volatile
+    var droppedFrames: Int = 0
         private set
 
     /**
@@ -132,31 +128,34 @@ class LiveStreamEncoder(
     }
 
     /**
-     * Feeds one camera frame into the encoder. The encoder is created with the
-     * real frame size the first time, so it always matches the camera.
+     * Feeds one camera frame into the encoder. The encoder is created with
+     * the real frame size the first time, so it always matches the camera.
      */
     fun submitFrame(image: ImageProxy) {
         if (!running.get()) return
+        submittedFrames++
         try {
-            if (codec == null) configure(image.width, image.height)
-            val surface = inputSurface ?: return
+            if (encoder == null) {
+                if (!createEncoder(image.width, image.height)) return
+            }
+            val active = encoder ?: return
+
             // The camera hands over more frames than the live feed needs, and
             // turning every frame into a picture is expensive - so only the
             // frames the encoder really wants are passed on.
-            val now = SystemClock.elapsedRealtime()
-            if (now - lastFedAt < 1000L / FPS) return
-            lastFedAt = now
-            // The picture is drawn into the encoder's surface. The camera
-            // hands over YUV, and CameraX knows how to turn that into a
-            // picture.
-            val bitmap = runCatching { image.toBitmap() }.getOrNull() ?: return
-            val canvas = lockCanvas(surface) ?: return
-            try {
-                canvas.drawBitmap(bitmap, 0f, 0f, null)
-            } finally {
-                runCatching { surface.unlockCanvasAndPost(canvas) }
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now - lastFedAt < 1000L / FPS) {
+                droppedFrames++
+                return
             }
-            measureLuma(bitmap)
+            lastFedAt = now
+
+            val ptsUs = nextTimestamp()
+            if (!active.submit(image, ptsUs)) {
+                droppedFrames++
+                return
+            }
+            measureLuma(image)
             frameIndex++
             callback.onFrame()
         } catch (e: Exception) {
@@ -169,46 +168,43 @@ class LiveStreamEncoder(
     private var lastFedAt = 0L
 
     /**
-     * Locks the surface of the encoder.
+     * The time of the next frame.
      *
-     * A surface of the encoder only works with the hardware canvas - the
-     * plain one is not allowed on it.
+     * The frames are one step of the frame rate apart, so every sample gets
+     * the same length and the player sees a steady picture.
      */
-    private fun lockCanvas(surface: Surface): Canvas? {
-        return try {
-            surface.lockHardwareCanvas()
+    private fun nextTimestamp(): Long {
+        val step = 1_000_000L / FPS
+        if (lastPtsUs < 0) lastPtsUs = 0
+        val next = lastPtsUs + step
+        lastPtsUs = next
+        return next
+    }
+
+    /** The average brightness of the picture that was just encoded. */
+    private fun measureLuma(image: ImageProxy) {
+        try {
+            val plane = image.planes.getOrNull(0) ?: return
+            val buffer = plane.buffer
+            val rowStride = plane.rowStride
+            val pixelStride = plane.pixelStride
+            val step = (image.width * image.height) / 4096
+            if (step < 1) return
+            var sum = 0L
+            var count = 0
+            var index = 0
+            while (index < buffer.limit() && count < 4096) {
+                sum += buffer.get(index).toInt() and 0xFF
+                count++
+                // The luma plane is the first one, so the samples of the
+                // chroma are simply not reached.
+                index += step
+            }
+            if (count > 0) averageLuma = (sum / count).toInt()
         } catch (e: Exception) {
-            Log.w(TAG, "the hardware canvas is not available: ${e.message}")
-            runCatching { surface.lockCanvas(null) }.getOrNull()
+            // The brightness is only a hint for the dashboard.
         }
     }
-
-    /** The average brightness of the picture that was just encoded. */
-    private fun measureLuma(bitmap: Bitmap) {
-        val w = bitmap.width
-        val h = bitmap.height
-        if (w <= 0 || h <= 0) return
-        val pixels = IntArray(w * h)
-        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
-        var sum = 0L
-        var i = 0
-        while (i < pixels.size) {
-            val p = pixels[i]
-            sum += ((p shr 16 and 0xFF) + (p shr 8 and 0xFF) + (p and 0xFF)) / 3
-            i += 16
-        }
-        averageLuma = (sum / (pixels.size / 16 + 1)).toInt()
-    }
-
-
-    /**
-     * Locks the surface of the encoder.
-     *
-     * A surface of the encoder only works with the hardware canvas - the
-     * plain one is not allowed on it.
-     */
-
-    /** The average brightness of the picture that was just encoded. */
 
     /** Reports a problem once, so the dashboard does not repeat it. */
     private var reportedProblem: String? = null
@@ -219,114 +215,42 @@ class LiveStreamEncoder(
         callback.onError(IllegalStateException(message))
     }
 
-    private fun configure(frameWidth: Int, frameHeight: Int) {
-        width = frameWidth
-        height = frameHeight
-        i420 = ByteArray(width * height * 3 / 2)
-        rowScratch = ByteArray(width)
-
-        // The encoder is picked by hand, because
-        // `createEncoderByType` happily returns a codec that cannot be fed
-        // with images at all.
-        val choice = pickEncoder()
-        if (choice == null) {
-            val message = "this phone has no H.264 encoder"
+    /**
+     * Creates the encoder for the size the camera delivers.
+     *
+     * The encoder is created for the real frame size, so the planes of the
+     * camera and the layout of the encoder always fit together.
+     */
+    private fun createEncoder(width: Int, height: Int): Boolean {
+        frameWidth = width
+        frameHeight = height
+        val active = H264Encoder(width, height, FPS, BITRATE)
+        if (!active.start()) {
+            val message = "this phone has no H.264 encoder for ${width}x$height"
             Log.e(TAG, message)
             callback.onError(IllegalStateException(message))
-            return
+            return false
         }
-        val (info, chosenFormat) = choice
-        encoderName = info.name
-        colorFormat = chosenFormat
-
-        val format = MediaFormat.createVideoFormat(MIME, width, height).apply {
-            setInteger(MediaFormat.KEY_BIT_RATE, BITRATE)
-            setInteger(MediaFormat.KEY_FRAME_RATE, FPS)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-            // No B frames: they would be stored in the order they are decoded,
-            // and the run of samples carries no information about that - the
-            // player would show the pictures in the wrong order and the
-            // reference pictures would be missing.
-            setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
-        }
-
-        try {
-            val encoder = MediaCodec.createByCodecName(info.name)
-            encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            // The picture goes into the encoder through a surface - the way
-            // every camera app does it. Handing the raw YUV planes to the codec
-            // instead depends on a colour format the codec only pretends to
-            // understand, and then the picture comes out black.
-            val surface = encoder.createInputSurface()
-            encoder.start()
-            codec = encoder
-            inputSurface = surface
-            val inputFormat = runCatching { encoder.inputFormat }.getOrNull()
-            stride = inputFormat?.getInteger(MediaFormat.KEY_STRIDE, width) ?: width
-            sliceHeight = inputFormat?.getInteger(MediaFormat.KEY_SLICE_HEIGHT, height) ?: height
-        } catch (e: Exception) {
-            Log.e(TAG, "the encoder refused the format: ${e.message}", e)
-            callback.onError(e)
-            return
-        }
-
+        encoder = active
         trackIndex = -1
         hasInitSegment = false
-        sawKeyFrame = false
         frameIndex = 0L
-        keyFrames = 0
+        lastPtsUs = -1L
         running.set(true)
         createMuxer()
         drainExecutor.execute { drainLoop() }
-        Log.w(TAG, "encoder started ($encoderName, colour $chosenFormat, ${width}x$height@$FPS)")
+        return true
     }
-
-    /** The surface the picture is drawn into. */
-    private var inputSurface: Surface? = null
-
-    /**
-     * Finds an H.264 encoder that takes image buffers.
-     *
-     * The order matters: planar YUV is what the conversion produces, the
-     * flexible format accepts the same layout, and semi planar needs the
-     * chroma planes woven together.
-     */
-    private fun pickEncoder(): Pair<MediaCodecInfo, Int>? {
-        val list = MediaCodecList(MediaCodecList.REGULAR_CODECS)
-        val preferred = intArrayOf(
-            // The layout most hardware encoders really want: the chroma
-            // planes woven together. An encoder that gets a layout it only
-            // pretends to understand produces a black picture without saying
-            // anything.
-            MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar,
-            MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible,
-            MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
-        )
-        for (info in list.codecInfos) {
-            if (!info.isEncoder) continue
-            for (type in info.supportedTypes) {
-                if (!type.equals(MIME, ignoreCase = true)) continue
-                val formats = runCatching {
-                    info.getCapabilitiesForType(type).colorFormats
-                }.getOrNull() ?: continue
-                for (candidate in preferred) {
-                    if (formats.contains(candidate)) return info to candidate
-                }
-            }
-        }
-        return null
-    }
-
-    /** The average brightness of the picture that was just converted. */
 
     /** The encoder and its layout - shown on the dashboard. */
     fun describe(): String =
-        "${encoderName ?: "none"} colour=$colorFormat ${width}x$height" +
+        "${encoder?.encoderName ?: "none"} colour=${encoder?.colorFormat ?: 0} " +
+            "${frameWidth}x$frameHeight" +
             " boxes=${fragmentStream?.parsedBoxes ?: 0}" +
             " frags=${fragmentStream?.publishedFragments ?: 0}" +
-            " key=$keyFrames" +
+            " key=${encoder?.keyFrames ?: 0}" +
             " luma=$averageLuma" +
-            " stride=$stride/$sliceHeight"
+            " sent=$submittedFrames dropped=$droppedFrames"
 
     private fun createMuxer() {
         try {
@@ -378,40 +302,29 @@ class LiveStreamEncoder(
     private fun drainLoop() {
         val codecInfo = MediaCodec.BufferInfo()
         while (running.get()) {
-            val encoder = codec ?: break
+            val active = encoder ?: break
             try {
-                var index = encoder.dequeueOutputBuffer(codecInfo, 10_000)
+                var index = active.dequeueOutput(codecInfo, 10_000)
                 if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    val format = buildTrackFormat(encoder.outputFormat)
+                    val format = buildTrackFormat(active.outputFormat)
                     if (format != null) {
                         muxer?.let { trackIndex = it.addTrack(format) }
                         Log.w(TAG, "encoder track added (${format.width}x${format.height})")
                     }
-                    index = encoder.dequeueOutputBuffer(codecInfo, 10_000)
+                    index = active.dequeueOutput(codecInfo, 10_000)
                 }
                 while (index >= 0) {
-                    val buffer = encoder.getOutputBuffer(index)
+                    val buffer = active.outputBuffer(index)
                     if (buffer != null && codecInfo.size > 0 && trackIndex >= 0) {
                         try {
                             buffer.position(codecInfo.offset)
                             buffer.limit(codecInfo.offset + codecInfo.size)
-                            // The very first sample has to be a key frame:
-                            // media3 throws away every video sample until one
-                            // arrives, and then the feed would stay empty.
-                            var flags = codecInfo.flags
-                            if (!sawKeyFrame) {
-                                flags = flags or MediaCodec.BUFFER_FLAG_KEY_FRAME
-                            }
-                            if ((flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) {
-                                sawKeyFrame = true
-                                keyFrames++
-                            }
-                            // media3's BufferInfo is immutable, so a new one is
-                            // needed for every sample.
+                            // media3's BufferInfo is immutable, so a new one
+                            // is needed for every sample.
                             val muxInfo = androidx.media3.muxer.BufferInfo(
                                 codecInfo.presentationTimeUs,
                                 codecInfo.size,
-                                flags
+                                codecInfo.flags
                             )
                             muxer?.writeSampleData(trackIndex, buffer, muxInfo)
                         } catch (e: Exception) {
@@ -420,8 +333,8 @@ class LiveStreamEncoder(
                             reportOnce("a frame could not be muxed: ${e.message}")
                         }
                     }
-                    encoder.releaseOutputBuffer(index, false)
-                    index = encoder.dequeueOutputBuffer(codecInfo, 10_000)
+                    active.releaseOutput(index)
+                    index = active.dequeueOutput(codecInfo, 10_000)
                 }
             } catch (e: Exception) {
                 if (running.get()) {
@@ -433,8 +346,6 @@ class LiveStreamEncoder(
         }
     }
 
-    /** Converts YUV_420_888 into the layout the encoder asked for. */
-
     /**
      * Builds a media3 [Format] from the encoder output.
      *
@@ -443,48 +354,22 @@ class LiveStreamEncoder(
      * unit. Android delivers them in its own "csd" format, so they are
      * unpacked here.
      */
-    private fun buildTrackFormat(outputFormat: MediaFormat): Format? {
-        val trackWidth = outputFormat.getInteger(MediaFormat.KEY_WIDTH, width)
-        val trackHeight = outputFormat.getInteger(MediaFormat.KEY_HEIGHT, height)
-
-        val csd0 = outputFormat.getByteBuffer("csd-0")?.let { readAll(it) }
-        val csd1 = outputFormat.getByteBuffer("csd-1")?.let { readAll(it) }
-
-        val split = AvcCodecConfig.split(csd0, csd1)
-        if (split == null) {
+    private fun buildTrackFormat(outputFormat: MediaFormat?): Format? {
+        if (outputFormat == null) return null
+        val format = AvcCodecConfig.buildVideoFormat(outputFormat, MimeTypes.VIDEO_H264)
+        if (format == null) {
             val message = "the encoder did not provide a usable SPS and PPS"
             Log.e(TAG, message)
             callback.onError(IllegalStateException(message))
             return null
         }
-
-        return Format.Builder()
-            .setSampleMimeType(MimeTypes.VIDEO_H264)
-            .setWidth(trackWidth)
-            .setHeight(trackHeight)
-            // The frame rate is the time base of the track: with it every
-            // frame lasts exactly one unit.
-            .setFrameRate(FPS.toFloat())
-            .setInitializationData(
-                listOf(
-                    AvcCodecConfig.withStartCode(split.first),
-                    AvcCodecConfig.withStartCode(split.second)
-                )
-            )
-            .build()
-    }
-
-    private fun readAll(buffer: ByteBuffer): ByteArray {
-        val data = ByteArray(buffer.remaining())
-        buffer.get(data)
-        return data
+        return format
     }
 
     fun stop() {
         if (!running.compareAndSet(true, false)) return
-        runCatching { codec?.stop() }
-        runCatching { codec?.release() }
-        codec = null
+        runCatching { encoder?.stop() }
+        encoder = null
         runCatching { muxer?.close() }
         muxer = null
         runCatching { fragmentStream?.flush() }
