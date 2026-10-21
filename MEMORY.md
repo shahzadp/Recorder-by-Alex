@@ -158,6 +158,19 @@ and measure its brightness — the only way to tell "black" from "not playing").
 
 ## 6. Status
 
+### The old beta — `com.alex.recorder.beta`
+
+The predecessor of this app, statically reverse-engineered with REA. The whole
+archive now lives in the project under
+`analysis/legacy-com.alex.recorder.beta/` — **read its `README.md` first**.
+It is the only record of features the rewrite dropped: FFmpegKit, OpenCV and
+TFLite motion detection, screen recording, dual-camera PiP, and the beta's much
+larger web dashboard (`app-assets/web/`). The `bulk/` folder there holds the
+pulled APK and the decompiled third-party libraries; it is not in git.
+
+The old package is **not** the current one — installing it keeps port 8080 and
+its own battery exemption, so uninstall it before testing this build.
+
 ### Working
 
 - Dashboard → **audio recording** ✅ (app closed, file written)

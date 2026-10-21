@@ -5,6 +5,12 @@ app/build/
 local.properties
 .kotlin/
 
+# The reverse-engineering archive of the old beta (com.alex.recorder.beta).
+# The analysis itself is tracked; the bulk - the pulled APK, the decompiled
+# third-party library sources and the native .so files - is not. It is
+# regenerable from the APK and would add ~230 MB of noise to the repository.
+analysis/legacy-com.alex.recorder.beta/bulk/
+
 # Build outputs
 *.apk
 *.aab

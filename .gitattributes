@@ -19,3 +19,10 @@ gradlew text eol=lf
 *.keystore binary
 *.mp4 binary
 *.m4a binary
+*.webp binary
+*.class binary
+*.mp3 binary
+*.ogg binary
+*.ttf binary
+*.tflite binary
+*.list binary
