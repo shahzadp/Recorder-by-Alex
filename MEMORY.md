@@ -31,7 +31,7 @@ cd D:\GitHub-Projects\Recorder-by-Alex
 - Gradle 9.1.0 wrapper · AGP 9.0.1 · JDK 21 · compileSdk/targetSdk 36 · minSdk 31
 - Kotlin 2.3.20 (AGP 9's built-in Kotlin — **no** `org.jetbrains.kotlin.android` plugin)
 - Dependencies: CameraX 1.6.2, media3 1.9.0 (common/muxer), Material 3, junit
-- **31 unit tests in 5 suites** — always run them, they catch the box-level mistakes
+- **33 unit tests in 7 suites** — always run them, they catch the box-level mistakes
 - Release: R8 + resource shrinking, ~3.0 MB signed APK
 - Git: `https://github.com/shahzadp/Recorder-by-Alex` (private) — this file and the
   README are the project notes, the repository is the source of truth
@@ -112,8 +112,19 @@ camera ─→ ImageAnalysis (YUV_420_888) ─→ H264Encoder (MediaCodec, byte b
 - `FragmentingOutputStream` splits the byte stream into the init segment and
   the fragments, and **injects the `tfdt`** (media3 never writes one) plus
   **adjusts the `trun` data offset** (the inserted box shifts the sample data).
-- `HlsStreamBuffer` keeps a 15-segment rolling window; the playlist is built
-  from it with the **real** segment durations.
+- `HlsStreamBuffer` keeps a **6-fragment (6 s) rolling window**; the playlist is
+  built from it with the **real** segment durations. The window is deliberately
+  short (it used to be 15): a longer one only lets a player that fell behind keep
+  replaying old fragments, so the delay piles up instead of snapping back to the
+  live edge. The dashboard's hls.js player is tuned to match
+  (`liveSyncDurationCount: 1`, small `maxBufferLength`), and the server sets
+  `tcpNoDelay` so the small playlist/segment responses go out immediately.
+- **Known issue (2026-10-27):** opening the dashboard in a browser often shows
+  the loading spinner and the stream only appears after a **manual refresh a few
+  seconds later**. The first `loadStream()` can run before the playlist has a
+  playable segment (or with a stale `initId`), and hls.js does not always
+  recover on its own. Needs a fix: wait for a non-empty playlist / retry, or
+  reload the source when the init segment or playlist changes. See section 7.
 - The **player is bundled** (`res/raw/hls_min.js`, hls.js 1.5.17, Apache-2.0) so
   the dashboard works on a phone without internet.
 
@@ -273,6 +284,9 @@ its own battery exemption, so uninstall it before testing this build.
   **not explained**. Watch for it: a single bad sample must not stop the feed.
 - The old `com.alex.recorder` app may still be installed on the phone: uninstall
   it, it keeps port 8080 and the old battery exemption.
+- **The dashboard needs a manual refresh on first open** (minor, noted
+  2026-10-27): the browser sits on the loading state for a few seconds and only
+  plays after the user refreshes. Not fixed yet.
 
 ---
 
@@ -288,6 +302,9 @@ its own battery exemption, so uninstall it before testing this build.
 3. Grant **"Keep the phone awake"** on the new package.
 4. The **pause/resume of the recording** while the feed runs.
 5. Delete the stale APKs from the project folder; keep only the newest.
+6. **Fix the first-load stall of the dashboard** — make the player wait for a
+   playable playlist and retry/reload by itself instead of needing a manual
+   browser refresh (see section 6).
 
 ---
 

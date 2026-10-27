@@ -110,8 +110,13 @@ of the app that is running, so it is always clear which APK is on the phone.
 How the feed is produced: `ImageAnalysis` (YUV) → `H264Encoder` (the camera's
 planes go into a hardware H.264 encoder as real YUV) → media3
 `FragmentedMp4Muxer` → a `FragmentingOutputStream` that splits it into an
-`ftyp`+`moov` init segment and `styp`+`moof`+`mdat` fragments, kept in a 15
-segment rolling window.
+`ftyp`+`moov` init segment and `styp`+`moof`+`mdat` fragments, kept in a 6
+second rolling window. The window is deliberately short: it has to be long
+enough for a player to join and to retry a segment, but a longer one only lets
+a player that fell behind keep replaying old fragments - the delay then piles
+up instead of snapping back to the live edge. The dashboard's hls.js player is
+tuned the same way: it starts one fragment behind the live edge and buffers a
+few seconds at most.
 
 A few things about that chain are worth knowing, because every one of them
 cost a debugging session:

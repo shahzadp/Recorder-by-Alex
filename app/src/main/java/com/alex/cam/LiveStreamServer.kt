@@ -89,6 +89,11 @@ class LiveStreamServer(
     private fun handle(client: Socket) {
         try {
             client.soTimeout = 15_000
+            // The live picture is a series of tiny responses (one playlist,
+            // one segment). Waiting for Nagle to collect more data before
+            // sending would add delay for no benefit, so each response goes
+            // out immediately.
+            client.tcpNoDelay = true
             val request = readRequest(client.getInputStream()) ?: return
             val response = try {
                 handler(request)

@@ -4,7 +4,24 @@ package com.alex.cam
  * Rolling window of the HLS media fragments, so a browser that joins late can
  * still catch up with the live edge.
  */
-class HlsStreamBuffer(private val capacity: Int = 15) {
+class HlsStreamBuffer(private val capacity: Int = DEFAULT_CAPACITY) {
+
+    companion object {
+        /**
+         * How many one-second fragments the window keeps.
+         *
+         * The window only has to be long enough for a player to join and to
+         * retry a segment that failed on the way: six fragments are three
+         * target durations plus a margin.
+         *
+         * A longer window is not better for a live feed. It does not make the
+         * picture arrive any sooner, but it lets a player that fell behind
+         * (a stalled tab, a Wi-Fi hiccup) keep fetching old fragments - so the
+         * delay piles up instead of the player snapping back to the live edge.
+         * It also keeps six segments of video in memory instead of fifteen.
+         */
+        const val DEFAULT_CAPACITY = 6
+    }
 
     private val lock = Any()
     private val segments = LinkedHashMap<Int, ByteArray>()

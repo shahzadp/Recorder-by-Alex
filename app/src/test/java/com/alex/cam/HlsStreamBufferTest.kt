@@ -81,6 +81,22 @@ class HlsStreamBufferTest {
     }
 
     @Test
+    fun theDefaultWindowIsShortEnoughForLive() {
+        // The live feed is one-second fragments: a short window keeps the
+        // player at the live edge instead of letting an old delay survive.
+        val buffer = HlsStreamBuffer()
+        for (sequence in 0 until 20) {
+            buffer.addFragment(sequence, fragment(sequence * 90_000L), 1000)
+        }
+
+        assertEquals(HlsStreamBuffer.DEFAULT_CAPACITY, buffer.fragmentCount())
+        assertEquals(
+            (20 - HlsStreamBuffer.DEFAULT_CAPACITY until 20).toList(),
+            buffer.sequences()
+        )
+    }
+
+    @Test
     fun aNewInitSegmentClearsTheOldFragments() {
         // The fragments of the old session belong to a different track and must
         // not be mixed with the new ones.

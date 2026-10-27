@@ -99,7 +99,18 @@
     if (hls) { hls.destroy(); hls = null; }
     var url = '/live.m3u8';
     if (window.Hls && window.Hls.isSupported()) {
-      hls = new Hls({ lowLatencyMode: false, liveSyncDurationCount: 2, maxLiveSyncPlaybackRate: 1.0 });
+      // Keep the player close to the live edge. The server publishes
+      // one-second fragments, so one fragment of sync margin costs about a
+      // second, while a long buffer would let an old delay survive a stall.
+      // The playback rate may rise slightly to catch up after a hiccup.
+      hls = new Hls({
+        lowLatencyMode: false,
+        liveSyncDurationCount: 1,
+        maxLiveSyncPlaybackRate: 1.5,
+        maxBufferLength: 6,
+        maxMaxBufferLength: 10,
+        backBufferLength: 4
+      });
       hls.on(Hls.Events.ERROR, function (evt, data) {
         if (data && data.fatal) { hint.textContent = 'Stream error - retrying...'; setTimeout(poll, 2000); }
       });
