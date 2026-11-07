@@ -78,8 +78,6 @@ app/src/main/java/com/alex/cam/
   HlsStreamBuffer.kt           the rolling window of fragments
   AvcCodecConfig.kt            unpacks the codec specific data of the encoder
   YuvConverter.kt              YUV_420_888 -> a flat I420 buffer
-analysis/legacy-com.alex.recorder.beta/
-                              the reverse-engineering archive of the old beta
 ```
 
 
